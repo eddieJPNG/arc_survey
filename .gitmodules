@@ -1,0 +1,3 @@
+[submodule "arc-survey-contracts/lib/forge-std"]
+	path = arc-survey-contracts/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
