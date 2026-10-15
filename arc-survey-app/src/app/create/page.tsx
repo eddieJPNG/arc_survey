@@ -8,6 +8,7 @@ import { useUSDC } from "@/hooks/useUSDC";
 import { useSurveyFactory } from "@/hooks/useSurveyFactory";
 import { useToast, parseTxError } from "@/components/Toast";
 import { contracts } from "@/lib/contracts";
+import { parseUnits } from "viem";
 
 export default function CreateSurvey() {
   const router = useRouter();
@@ -52,14 +53,25 @@ export default function CreateSurvey() {
       setStep("creating");
       const loadingId2 = addToast("loading", "Creating survey...");
 
-      const createTx = await factory.createSurvey(
+      const createResult = await factory.createSurvey(
         title,
         description,
         parseInt(maxResponses),
         rewardPerResponse
       );
       removeToast(loadingId2);
-      addToast("success", "Survey created!", createTx);
+      addToast("success", "Survey created!", createResult.txHash);
+
+      const loadingId3 = addToast("loading", "Funding survey...");
+      const totalRewardRaw = parseUnits(totalReward, 6);
+      const rewardPerResponseRaw = parseUnits(rewardPerResponse, 6);
+      const fundTx = await factory.fundSurvey(
+        createResult.surveyId,
+        totalRewardRaw,
+        rewardPerResponseRaw
+      );
+      removeToast(loadingId3);
+      addToast("success", "Survey funded!", fundTx);
 
       setStep("done");
       router.push("/");

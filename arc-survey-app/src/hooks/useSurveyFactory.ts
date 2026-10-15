@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { encodeFunctionData } from "viem";
 import { contracts } from "@/lib/contracts";
 
@@ -17,6 +17,22 @@ export type Survey = {
 };
 
 const factoryAbi = contracts.surveyFactory.abi;
+
+async function waitForReceipt(
+  provider: any,
+  txHash: string,
+  maxAttempts = 20,
+  intervalMs = 500
+): Promise<void> {
+  for (let i = 0; i < maxAttempts; i++) {
+    const receipt = await provider.request({
+      method: "eth_getTransactionReceipt",
+      params: [txHash],
+    });
+    if (receipt) return;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
 
 export function useSurveyFactory(provider: any) {
   const [isLoading, setIsLoading] = useState(false);
@@ -57,8 +73,10 @@ export function useSurveyFactory(provider: any) {
 
       const txHash = (await provider.request({
         method: "eth_sendTransaction",
-        params: [{ from: accounts[0], to: contracts.surveyFactory.address, data }],
+        params: [{ from: accounts[0], to: contracts.surveyVault.address, data }],
       })) as string;
+
+      await waitForReceipt(provider, txHash);
 
       return txHash;
     },
@@ -73,7 +91,6 @@ export function useSurveyFactory(provider: any) {
       rewardPerResponse: string
     ): Promise<{ txHash: string; surveyId: bigint }> => {
       const rewardRaw = BigInt(Math.floor(parseFloat(rewardPerResponse) * 1e6));
-      const totalReward = rewardRaw * BigInt(maxResponses);
 
       const txHash = await writeCall("createSurvey", [
         title,
@@ -81,6 +98,8 @@ export function useSurveyFactory(provider: any) {
         BigInt(maxResponses),
         rewardRaw,
       ]);
+
+      await waitForReceipt(provider, txHash);
 
       const countHex = await readCall("surveyCount", []);
       const surveyId = BigInt(countHex);
@@ -205,9 +224,10 @@ export function useSurveyFactory(provider: any) {
     [provider]
   );
 
-  return {
+  return useMemo(() => ({
     isLoading,
     createSurvey,
+    fundSurvey,
     submitResponse,
     getSurvey,
     listSurveys,
@@ -215,20 +235,41 @@ export function useSurveyFactory(provider: any) {
     hasResponded,
     getSurveyBalance,
     withdrawRemaining,
-  };
+  }), [createSurvey, fundSurvey, submitResponse, getSurvey, listSurveys, getRespondents, hasResponded, getSurveyBalance, withdrawRemaining]);
 }
 
 function decodeSurvey(hex: string): Survey {
-  const data = hex.startsWith("0x") ? hex.slice(2) : hex;
+  const raw = hex.startsWith("0x") ? hex.slice(2) : hex;
+  const data = raw;
+
+  if (data.length < 640) {
+    return {
+      id: BigInt(0),
+      creator: "0x0000000000000000000000000000000000000000",
+      title: "",
+      description: "",
+      maxResponses: BigInt(0),
+      rewardPerResponse: BigInt(0),
+      responseCount: BigInt(0),
+      active: false,
+      createdAt: BigInt(0),
+    };
+  }
 
   const readSlot = (offset: number, size: number = 64): string =>
     data.slice(offset, offset + size);
 
-  const readUint = (offset: number): bigint =>
-    BigInt("0x" + readSlot(offset));
+  const readUint = (offset: number): bigint => {
+    const slot = readSlot(offset);
+    if (!/^[0-9a-fA-F]+$/.test(slot) || slot.length < 64) return BigInt(0);
+    return BigInt("0x" + slot);
+  };
 
-  const readAddress = (offset: number): string =>
-    "0x" + readSlot(offset).slice(24);
+  const readAddress = (offset: number): string => {
+    const slot = readSlot(offset);
+    if (slot.length < 64) return "0x0000000000000000000000000000000000000000";
+    return "0x" + slot.slice(24);
+  };
 
   const readBool = (offset: number): boolean =>
     readSlot(offset) !== "0".repeat(64);
@@ -279,7 +320,11 @@ function decodeSurvey(hex: string): Survey {
 
 function decodeString(hex: string, offset: number): string {
   const dataOffset = offset * 2;
-  const length = Number(BigInt("0x" + hex.slice(dataOffset, dataOffset + 64)));
+  if (dataOffset + 64 > hex.length) return "";
+  const lengthHex = hex.slice(dataOffset, dataOffset + 64);
+  if (!/^[0-9a-fA-F]+$/.test(lengthHex)) return "";
+  const length = Number(BigInt("0x" + lengthHex));
+  if (length <= 0 || length > 10000) return "";
   const bytesStart = dataOffset + 64;
   const bytesHex = hex.slice(bytesStart, bytesStart + length * 2);
 
@@ -292,12 +337,17 @@ function decodeString(hex: string, offset: number): string {
 }
 
 function decodeAddressArray(hex: string): string[] {
-  const data = hex.startsWith("0x") ? hex.slice(2) : hex;
-  const length = Number(BigInt("0x" + data.slice(0, 64)));
+  const raw = hex.startsWith("0x") ? hex.slice(2) : hex;
+  const data = raw;
+
+  if (data.length < 128) return [];
+
+  const arrayOffset = Number(BigInt("0x" + data.slice(0, 64))) * 2;
+  const length = Number(BigInt("0x" + data.slice(arrayOffset, arrayOffset + 64)));
   const addresses: string[] = [];
 
   for (let i = 0; i < length; i++) {
-    const offset = 64 + i * 64;
+    const offset = arrayOffset + 64 + i * 64;
     addresses.push("0x" + data.slice(offset + 24, offset + 64));
   }
 
